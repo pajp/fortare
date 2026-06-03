@@ -175,6 +175,11 @@
 				TargetAttributes = {
 					3AD017082FD0A86100E9F413 = {
 						CreatedOnToolsVersion = 26.4;
+						SystemCapabilities = {
+							com.apple.HealthKit = {
+								enabled = 1;
+							};
+						};
 					};
 					3AD017152FD0A86300E9F413 = {
 						CreatedOnToolsVersion = 26.4;
@@ -400,6 +405,8 @@
 				DEVELOPMENT_TEAM = 7BJ49E34RD;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				CODE_SIGN_ENTITLEMENTS = Fortare/Fortare.entitlements;
+				INFOPLIST_KEY_NSHealthShareUsageDescription = "Fortare reads cycling workout routes from Apple Health to build your route heat map.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -432,6 +439,8 @@
 				DEVELOPMENT_TEAM = 7BJ49E34RD;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				CODE_SIGN_ENTITLEMENTS = Fortare/Fortare.entitlements;
+				INFOPLIST_KEY_NSHealthShareUsageDescription = "Fortare reads cycling workout routes from Apple Health to build your route heat map.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
