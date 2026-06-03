@@ -63,9 +63,14 @@ struct ContentView: View {
 
                     Spacer()
 
-                    bottomPanel
-                        .padding(.horizontal, 18)
-                        .padding(.bottom, 18)
+                    HStack {
+                        bottomPanel
+                            .frame(maxWidth: 520)
+
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.horizontal, 18)
+                    .padding(.bottom, 18)
                 }
                 .transition(.opacity)
             }
@@ -77,20 +82,31 @@ struct ContentView: View {
     }
 
     private var bottomPanel: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack(alignment: .lastTextBaseline) {
+        VStack(alignment: .leading, spacing: 12) {
+            LazyVGrid(
+                columns: [
+                    GridItem(.flexible(minimum: 66), alignment: .leading),
+                    GridItem(.flexible(minimum: 66), alignment: .leading),
+                    GridItem(.flexible(minimum: 66), alignment: .leading),
+                    GridItem(.flexible(minimum: 66), alignment: .leading)
+                ],
+                alignment: .leading,
+                spacing: 10
+            ) {
                 metric(value: "\(store.routeCount)", label: "routes")
-                metric(value: store.distanceText, label: "km traced")
+                metric(value: store.distanceText, label: "km")
+                metric(value: "\(store.daysWithSessions)", label: "days")
+                metric(value: store.averageDistanceText, label: "avg km")
             }
 
             HeatScaleView()
         }
-        .padding(16)
+        .padding(14)
         .background {
-            RoundedRectangle(cornerRadius: 26, style: .continuous)
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
                 .fill(.black.opacity(0.54))
                 .overlay(
-                    RoundedRectangle(cornerRadius: 26, style: .continuous)
+                    RoundedRectangle(cornerRadius: 24, style: .continuous)
                         .stroke(.white.opacity(0.09), lineWidth: 1)
                 )
                 .shadow(color: .cyan.opacity(0.22), radius: 24, y: 14)
@@ -98,17 +114,20 @@ struct ContentView: View {
     }
 
     private func metric(value: String, label: String) -> some View {
-        VStack(alignment: .leading, spacing: 1) {
+        VStack(alignment: .leading, spacing: 0) {
             Text(value)
-                .font(.system(size: 29, weight: .black, design: .rounded))
+                .font(.system(size: 22, weight: .black, design: .rounded))
                 .foregroundStyle(.white)
+                .lineLimit(1)
+                .minimumScaleFactor(0.68)
                 .contentTransition(.numericText())
 
             Text(label)
-                .font(.system(size: 12, weight: .bold, design: .rounded))
+                .font(.system(size: 10, weight: .bold, design: .rounded))
                 .foregroundStyle(.white.opacity(0.56))
+                .lineLimit(1)
         }
-        .frame(minWidth: 92, alignment: .leading)
+        .frame(minWidth: 66, alignment: .leading)
     }
 }
 

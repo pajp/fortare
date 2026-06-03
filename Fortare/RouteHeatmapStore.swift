@@ -16,6 +16,7 @@ final class RouteHeatmapStore: ObservableObject {
     @Published private(set) var overlay: TrafficOverlay?
     @Published private(set) var routeCount = 0
     @Published private(set) var totalDistance: CLLocationDistance = 0
+    @Published private(set) var daysWithSessions = 0
     @Published private(set) var isLoading = false
     @Published private(set) var importProgress = 0.0
     @Published private(set) var statusText = "Import bicycle workouts from Apple Health to paint every ridden route into one animated heat overlay."
@@ -24,6 +25,13 @@ final class RouteHeatmapStore: ObservableObject {
 
     var distanceText: String {
         let kilometers = totalDistance / 1_000
+        return kilometers >= 100 ? "\(Int(kilometers.rounded()))" : String(format: "%.1f", kilometers)
+    }
+
+    var averageDistanceText: String {
+        guard routeCount > 0 else { return "0.0" }
+
+        let kilometers = totalDistance / Double(routeCount) / 1_000
         return kilometers >= 100 ? "\(Int(kilometers.rounded()))" : String(format: "%.1f", kilometers)
     }
 
@@ -44,6 +52,7 @@ final class RouteHeatmapStore: ObservableObject {
             overlay = result.overlay
             routeCount = routes.count
             totalDistance = result.distance
+            daysWithSessions = Set(routes.map { Calendar.current.startOfDay(for: $0.date) }).count
             importProgress = 1
             statusText = routes.isEmpty
                 ? "No outdoor cycling routes were found in Apple Health for \(window.title.lowercased())."
@@ -54,6 +63,11 @@ final class RouteHeatmapStore: ObservableObject {
 
         isLoading = false
     }
+}
+
+struct ImportedRoute {
+    let date: Date
+    let coordinates: [CLLocationCoordinate2D]
 }
 
 struct ImportWindow: Equatable {
@@ -93,14 +107,14 @@ final class HealthRouteImporter {
     func loadCyclingRoutes(
         since startDate: Date?,
         progress: @escaping @MainActor (_ completed: Int, _ total: Int) -> Void
-    ) async throws -> [[CLLocationCoordinate2D]] {
+    ) async throws -> [ImportedRoute] {
         guard HKHealthStore.isHealthDataAvailable() else {
             throw RouteImportError.healthUnavailable
         }
 
         try await requestAuthorization()
         let workouts = try await cyclingWorkouts(since: startDate)
-        var allRoutes: [[CLLocationCoordinate2D]] = []
+        var allRoutes: [ImportedRoute] = []
 
         progress(0, workouts.count)
 
@@ -110,7 +124,7 @@ final class HealthRouteImporter {
                 let locations = try await locations(for: route)
                 let coordinates = simplified(locations.map(\.coordinate))
                 if coordinates.count > 1 {
-                    allRoutes.append(coordinates)
+                    allRoutes.append(ImportedRoute(date: workout.startDate, coordinates: coordinates))
                 }
             }
 
@@ -236,12 +250,13 @@ enum RouteImportError: LocalizedError {
 }
 
 struct RouteHeatmapBuilder {
-    private static let snapDistance = 10.0
+    private static let mergeRadius = 10.0
 
-    static func makeOverlay(from routes: [[CLLocationCoordinate2D]]) -> (overlay: TrafficOverlay?, distance: CLLocationDistance) {
+    static func makeOverlay(from routes: [ImportedRoute]) -> (overlay: TrafficOverlay?, distance: CLLocationDistance) {
+        let clusteredRoutes = clusteredRoutes(from: routes.map(\.coordinates))
         var segmentKeys: [String] = []
-        for route in routes {
-            segmentKeys.append(contentsOf: routeSegmentKeys(snappedRoute(route)))
+        for route in clusteredRoutes {
+            segmentKeys.append(contentsOf: routeSegmentKeys(route))
         }
 
         let counts = Dictionary(grouping: segmentKeys, by: { $0 }).mapValues(\.count)
@@ -249,21 +264,20 @@ struct RouteHeatmapBuilder {
         var segments: [TrafficSegment] = []
         var totalDistance: CLLocationDistance = 0
 
-        for route in routes {
-            let snapped = snappedRoute(route)
-            for pair in zip(snapped, snapped.dropFirst()) {
-                guard pair.0.latitude != pair.1.latitude || pair.0.longitude != pair.1.longitude else { continue }
+        for route in clusteredRoutes {
+            for pair in zip(route, route.dropFirst()) {
+                guard pair.0.clusterID != pair.1.clusterID else { continue }
 
-                let distance = CLLocation(latitude: pair.0.latitude, longitude: pair.0.longitude)
-                    .distance(from: CLLocation(latitude: pair.1.latitude, longitude: pair.1.longitude))
+                let distance = CLLocation(latitude: pair.0.coordinate.latitude, longitude: pair.0.coordinate.longitude)
+                    .distance(from: CLLocation(latitude: pair.1.coordinate.latitude, longitude: pair.1.coordinate.longitude))
                 guard distance > 0, distance < 2_000 else { continue }
 
                 let rawCount = counts[segmentKey(pair.0, pair.1)] ?? 1
                 let weight = min(1, Double(rawCount) / Double(normalizationCount))
                 segments.append(
                     TrafficSegment(
-                        start: MKMapPoint(pair.0),
-                        end: MKMapPoint(pair.1),
+                        start: MKMapPoint(pair.0.coordinate),
+                        end: MKMapPoint(pair.1.coordinate),
                         intensity: weight
                     )
                 )
@@ -278,48 +292,85 @@ struct RouteHeatmapBuilder {
         return (TrafficOverlay(segments: segments), totalDistance)
     }
 
-    private static func snappedRoute(_ route: [CLLocationCoordinate2D]) -> [CLLocationCoordinate2D] {
-        var snapped: [CLLocationCoordinate2D] = []
-        var lastKey: String?
+    private static func clusteredRoutes(from routes: [[CLLocationCoordinate2D]]) -> [[ClusteredPoint]] {
+        var points: [RoutePoint] = []
+        var routePointIndexes = Array(repeating: [Int](), count: routes.count)
 
-        for coordinate in route {
-            let point = snappedCoordinate(coordinate)
-            let key = cellKey(point)
+        for (routeIndex, route) in routes.enumerated() {
+            for coordinate in route {
+                guard CLLocationCoordinate2DIsValid(coordinate) else { continue }
 
-            if key != lastKey {
-                snapped.append(point)
-                lastKey = key
+                let point = RoutePoint(coordinate: coordinate)
+                routePointIndexes[routeIndex].append(points.count)
+                points.append(point)
             }
         }
 
-        return snapped
+        guard !points.isEmpty else { return [] }
+
+        var clusters: [PointCluster] = []
+        var buckets: [BucketKey: [Int]] = [:]
+        var pointClusterIDs = Array(repeating: 0, count: points.count)
+
+        for (index, point) in points.enumerated() {
+            let key = bucketKey(for: point)
+            var bestClusterID: Int?
+            var bestDistance = Double.greatestFiniteMagnitude
+
+            for x in (key.x - 1)...(key.x + 1) {
+                for y in (key.y - 1)...(key.y + 1) {
+                    for clusterID in buckets[BucketKey(x: x, y: y), default: []] {
+                        let distance = clusters[clusterID].distance(to: point)
+                        if distance <= mergeRadius, distance < bestDistance {
+                            bestClusterID = clusterID
+                            bestDistance = distance
+                        }
+                    }
+                }
+            }
+
+            if let bestClusterID {
+                clusters[bestClusterID].add(point)
+                pointClusterIDs[index] = bestClusterID
+            } else {
+                let clusterID = clusters.count
+                clusters.append(PointCluster(seed: point))
+                buckets[key, default: []].append(clusterID)
+                pointClusterIDs[index] = clusterID
+            }
+        }
+
+        return routePointIndexes.map { pointIndexes in
+            var route: [ClusteredPoint] = []
+            var previousClusterID: Int?
+
+            for pointIndex in pointIndexes {
+                let clusterID = pointClusterIDs[pointIndex]
+                guard clusterID != previousClusterID else { continue }
+
+                route.append(ClusteredPoint(clusterID: clusterID, coordinate: clusters[clusterID].coordinate))
+                previousClusterID = clusterID
+            }
+
+            return route
+        }
     }
 
-    private static func routeSegmentKeys(_ route: [CLLocationCoordinate2D]) -> [String] {
+    private static func routeSegmentKeys(_ route: [ClusteredPoint]) -> [String] {
         zip(route, route.dropFirst()).map { segmentKey($0.0, $0.1) }
     }
 
-    private static func segmentKey(_ first: CLLocationCoordinate2D, _ second: CLLocationCoordinate2D) -> String {
-        let firstCell = cellKey(first)
-        let secondCell = cellKey(second)
-        return firstCell < secondCell ? "\(firstCell)-\(secondCell)" : "\(secondCell)-\(firstCell)"
+    private static func segmentKey(_ first: ClusteredPoint, _ second: ClusteredPoint) -> String {
+        let firstID = first.clusterID
+        let secondID = second.clusterID
+        return firstID < secondID ? "\(firstID)-\(secondID)" : "\(secondID)-\(firstID)"
     }
 
-    private static func cellKey(_ coordinate: CLLocationCoordinate2D) -> String {
-        let latitude = Int((coordinate.latitude * 111_320 / snapDistance).rounded())
-        let longitudeScale = max(cos(coordinate.latitude * .pi / 180), 0.15)
-        let longitude = Int((coordinate.longitude * 111_320 * longitudeScale / snapDistance).rounded())
-        return "\(latitude):\(longitude)"
-    }
-
-    private static func snappedCoordinate(_ coordinate: CLLocationCoordinate2D) -> CLLocationCoordinate2D {
-        let latitudeUnits = (coordinate.latitude * 111_320 / snapDistance).rounded()
-        let snappedLatitude = latitudeUnits * snapDistance / 111_320
-        let longitudeScale = max(cos(snappedLatitude * .pi / 180), 0.15)
-        let longitudeUnits = (coordinate.longitude * 111_320 * longitudeScale / snapDistance).rounded()
-        let snappedLongitude = longitudeUnits * snapDistance / (111_320 * longitudeScale)
-
-        return CLLocationCoordinate2D(latitude: snappedLatitude, longitude: snappedLongitude)
+    private static func bucketKey(for point: RoutePoint) -> BucketKey {
+        BucketKey(
+            x: Int(floor(point.x / mergeRadius)),
+            y: Int(floor(point.y / mergeRadius))
+        )
     }
 
     private static func percentile(_ values: [Int], percentile: Double) -> Int {
@@ -328,5 +379,60 @@ struct RouteHeatmapBuilder {
         let sorted = values.sorted()
         let index = min(sorted.count - 1, max(0, Int(Double(sorted.count - 1) * percentile)))
         return max(sorted[index], 1)
+    }
+}
+
+private struct ClusteredPoint {
+    let clusterID: Int
+    let coordinate: CLLocationCoordinate2D
+}
+
+private struct RoutePoint {
+    let coordinate: CLLocationCoordinate2D
+    let x: Double
+    let y: Double
+
+    init(coordinate: CLLocationCoordinate2D) {
+        self.coordinate = coordinate
+        let latitudeRadians = coordinate.latitude * .pi / 180
+        x = coordinate.longitude * 111_320 * max(cos(latitudeRadians), 0.15)
+        y = coordinate.latitude * 111_320
+    }
+
+    func distance(to other: RoutePoint) -> Double {
+        hypot(x - other.x, y - other.y)
+    }
+}
+
+private struct BucketKey: Hashable {
+    let x: Int
+    let y: Int
+}
+
+private struct PointCluster {
+    private let seedX: Double
+    private let seedY: Double
+    private var latitude = 0.0
+    private var longitude = 0.0
+    private var count = 0.0
+
+    init(seed: RoutePoint) {
+        seedX = seed.x
+        seedY = seed.y
+        add(seed)
+    }
+
+    var coordinate: CLLocationCoordinate2D {
+        CLLocationCoordinate2D(latitude: latitude / count, longitude: longitude / count)
+    }
+
+    mutating func add(_ point: RoutePoint) {
+        latitude += point.coordinate.latitude
+        longitude += point.coordinate.longitude
+        count += 1
+    }
+
+    func distance(to point: RoutePoint) -> Double {
+        hypot(seedX - point.x, seedY - point.y)
     }
 }
