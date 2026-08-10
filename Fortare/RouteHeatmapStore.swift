@@ -35,7 +35,7 @@ final class RouteHeatmapStore: ObservableObject {
         return kilometers >= 100 ? "\(Int(kilometers.rounded()))" : String(format: "%.1f", kilometers)
     }
 
-    func loadRoutes(window: ImportWindow = .default) async {
+    func loadRoutes(window: ImportWindow = .default, workoutMode: WorkoutImportMode = .biking) async {
         guard !isLoading else { return }
 
         isLoading = true
@@ -43,10 +43,10 @@ final class RouteHeatmapStore: ObservableObject {
         statusText = "Requesting Health access..."
 
         do {
-            let routes = try await importer.loadCyclingRoutes(since: window.startDate) { [weak self] completed, total in
+            let routes = try await importer.loadRoutes(since: window.startDate, workoutMode: workoutMode) { [weak self] completed, total in
                 guard let self else { return }
                 importProgress = total == 0 ? 0 : Double(completed) / Double(total)
-                statusText = total == 0 ? "Scanning \(window.title.lowercased())..." : "Importing \(completed) of \(total) rides..."
+                statusText = total == 0 ? "Scanning \(window.title.lowercased())..." : "Importing \(completed) of \(total) \(workoutMode.progressName)..."
             }
             let result = RouteHeatmapBuilder.makeOverlay(from: routes)
             overlay = result.overlay
@@ -55,7 +55,7 @@ final class RouteHeatmapStore: ObservableObject {
             daysWithSessions = Set(routes.map { Calendar.current.startOfDay(for: $0.date) }).count
             importProgress = 1
             statusText = routes.isEmpty
-                ? "No outdoor cycling routes were found in Apple Health for \(window.title.lowercased())."
+                ? "No outdoor \(workoutMode.routeDescription) were found in Apple Health for \(window.title.lowercased())."
                 : "\(routes.count) route\(routes.count == 1 ? "" : "s") loaded."
         } catch {
             statusText = error.localizedDescription
@@ -68,6 +68,58 @@ final class RouteHeatmapStore: ObservableObject {
 struct ImportedRoute {
     let date: Date
     let coordinates: [CLLocationCoordinate2D]
+}
+
+enum WorkoutImportMode: CaseIterable, Identifiable {
+    case biking
+    case walking
+    case bikingAndWalking
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .biking:
+            "Biking"
+        case .walking:
+            "Walking"
+        case .bikingAndWalking:
+            "Biking+Walking"
+        }
+    }
+
+    var activityTypes: [HKWorkoutActivityType] {
+        switch self {
+        case .biking:
+            [.cycling]
+        case .walking:
+            [.walking]
+        case .bikingAndWalking:
+            [.cycling, .walking]
+        }
+    }
+
+    var progressName: String {
+        switch self {
+        case .biking:
+            "rides"
+        case .walking:
+            "walks"
+        case .bikingAndWalking:
+            "workouts"
+        }
+    }
+
+    var routeDescription: String {
+        switch self {
+        case .biking:
+            "biking routes"
+        case .walking:
+            "walking routes"
+        case .bikingAndWalking:
+            "biking or walking routes"
+        }
+    }
 }
 
 struct ImportWindow: Equatable {
@@ -104,8 +156,9 @@ struct ImportWindow: Equatable {
 final class HealthRouteImporter {
     private let healthStore = HKHealthStore()
 
-    func loadCyclingRoutes(
+    func loadRoutes(
         since startDate: Date?,
+        workoutMode: WorkoutImportMode,
         progress: @escaping @MainActor (_ completed: Int, _ total: Int) -> Void
     ) async throws -> [ImportedRoute] {
         guard HKHealthStore.isHealthDataAvailable() else {
@@ -113,7 +166,7 @@ final class HealthRouteImporter {
         }
 
         try await requestAuthorization()
-        let workouts = try await cyclingWorkouts(since: startDate)
+        let workouts = try await workouts(since: startDate, workoutMode: workoutMode)
         var allRoutes: [ImportedRoute] = []
 
         progress(0, workouts.count)
@@ -153,9 +206,12 @@ final class HealthRouteImporter {
         }
     }
 
-    private func cyclingWorkouts(since startDate: Date?) async throws -> [HKWorkout] {
+    private func workouts(since startDate: Date?, workoutMode: WorkoutImportMode) async throws -> [HKWorkout] {
         try await withCheckedThrowingContinuation { continuation in
-            var predicates = [HKQuery.predicateForWorkouts(with: .cycling)]
+            let activityPredicate = NSCompoundPredicate(
+                orPredicateWithSubpredicates: workoutMode.activityTypes.map { HKQuery.predicateForWorkouts(with: $0) }
+            )
+            var predicates: [NSPredicate] = [activityPredicate]
             if let startDate {
                 predicates.append(HKQuery.predicateForSamples(withStart: startDate, end: nil, options: .strictEndDate))
             }

@@ -11,6 +11,7 @@ struct ContentView: View {
     @StateObject private var store = RouteHeatmapStore()
     @State private var isChoosingRange = false
     @State private var selectedRangeIndex = ImportWindow.presets.firstIndex(of: .default) ?? 4
+    @State private var selectedWorkoutMode: WorkoutImportMode = .biking
 
     var body: some View {
         ZStack {
@@ -49,11 +50,12 @@ struct ContentView: View {
                         if isChoosingRange {
                             ImportRangePanel(
                                 selectedIndex: $selectedRangeIndex,
+                                selectedWorkoutMode: $selectedWorkoutMode,
                                 presets: ImportWindow.presets
                             ) {
                                 let window = ImportWindow.presets[selectedRangeIndex]
                                 isChoosingRange = false
-                                Task { await store.loadRoutes(window: window) }
+                                Task { await store.loadRoutes(window: window, workoutMode: selectedWorkoutMode) }
                             }
                             .transition(.scale(scale: 0.94, anchor: .topTrailing).combined(with: .opacity))
                         }
@@ -77,7 +79,7 @@ struct ContentView: View {
         }
         .animation(.spring(response: 0.42, dampingFraction: 0.84), value: store.isLoading)
         .task {
-            await store.loadRoutes()
+            await store.loadRoutes(workoutMode: selectedWorkoutMode)
         }
     }
 
@@ -133,6 +135,7 @@ struct ContentView: View {
 
 private struct ImportRangePanel: View {
     @Binding var selectedIndex: Int
+    @Binding var selectedWorkoutMode: WorkoutImportMode
 
     let presets: [ImportWindow]
     let importAction: () -> Void
@@ -161,6 +164,23 @@ private struct ImportRangePanel: View {
             }
             .font(.system(size: 11, weight: .black, design: .rounded))
             .foregroundStyle(.white.opacity(0.44))
+
+            HStack {
+                Text("Workout")
+                    .font(.system(size: 13, weight: .black, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.82))
+
+                Spacer()
+
+                Picker("Workout", selection: $selectedWorkoutMode) {
+                    ForEach(WorkoutImportMode.allCases) { mode in
+                        Text(mode.title)
+                            .tag(mode)
+                    }
+                }
+                .pickerStyle(.menu)
+                .tint(.white)
+            }
 
             Button(action: importAction) {
                 Text("Start")
